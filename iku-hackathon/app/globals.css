@@ -1,26 +1,95 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: light;
+  --background: #fff7fa;
+  --foreground: #3b484b;
+  --card: #ffffff;
+  --card-foreground: #4a5759;
+  --muted: #f1efea;
+  --muted-foreground: #596669;
+  --border: #ded8d3;
+  --accent: #edafb8;
+  --accent-foreground: #3b484b;
+  --accent-soft: #f1c8cb;
+  --pink-soft: #f1c8cb;
+  --availability: #b0c4b1;
+  --availability-soft: #dce9dd;
+  --deep: #4a5759;
+  --pink-strong: #9e5360;
+  --calendar-grid: #faf6f2;
+  --calendar-switch: #efede6;
+  --personal-wash: #fff0f2;
+  --input: #ffffff;
+  --primary-action: #4a5759;
+  --primary-action-foreground: #ffffff;
+  --calendar-none: #e4e1dc;
+  --calendar-none-foreground: #3b484b;
+  --pink-foreground: #3b484b;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-soft: var(--accent-soft);
+  --color-availability: var(--availability);
+  --color-availability-soft: var(--availability-soft);
+  --color-deep: var(--deep);
+  --color-pink: #edafb8;
+  --color-pink-soft: var(--pink-soft);
+  --color-pink-strong: var(--pink-strong);
+  --color-calendar-grid: var(--calendar-grid);
+  --color-calendar-switch: var(--calendar-switch);
+  --color-personal-wash: var(--personal-wash);
+  --color-input: var(--input);
+  --color-primary-action: var(--primary-action);
+  --color-primary-action-foreground: var(--primary-action-foreground);
+  --color-calendar-none: var(--calendar-none);
+  --color-calendar-none-foreground: var(--calendar-none-foreground);
+  --color-pink-foreground: var(--pink-foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    color-scheme: dark;
+    --background: #273133;
+    --foreground: #f7e1d7;
+    --card: #343e40;
+    --card-foreground: #f7e1d7;
+    --muted: #3e494b;
+    --muted-foreground: #dedbd2;
+    --border: #526164;
+    --accent: #edafb8;
+    --accent-foreground: #273133;
+    --accent-soft: #554348;
+    --pink-soft: #554348;
+    --availability: #b0c4b1;
+    --availability-soft: #3e5148;
+    --deep: #f7e1d7;
+    --pink-strong: #edafb8;
+    --calendar-grid: #303a3c;
+    --calendar-switch: #273133;
+    --personal-wash: #443b3c;
+    --input: #273133;
+    --primary-action: #edafb8;
+    --primary-action-foreground: #273133;
+    --calendar-none: #4a5759;
+    --calendar-none-foreground: #f7e1d7;
+    --pink-foreground: #273133;
   }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
 }
