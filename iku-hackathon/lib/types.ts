@@ -1,5 +1,13 @@
 export type IsoUtcString = string;
 
+export interface AvailabilitySlot {
+  start: IsoUtcString;
+  end: IsoUtcString;
+  availableUserIds: string[];
+  availableCount: number;
+  totalSelected: number;
+}
+
 export interface User {
   id: string;
   name: string;
