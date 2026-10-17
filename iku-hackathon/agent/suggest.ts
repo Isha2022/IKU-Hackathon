@@ -1,4 +1,5 @@
 import type { Proposal } from "../lib/types";
+import type { AgentToolContext } from "./handlers";
 import type { SuggestRequest, SuggestResponse } from "../types/contracts";
 import { collectAgentEvidence, createAgentToolHandlers, executeAgentTool } from "./handlers";
 import { runGeminiAgent } from "./loop";
@@ -66,6 +67,7 @@ export async function suggestHangout(input: SuggestRequest = {}): Promise<Sugges
   const endIso = input.endIso ?? DEFAULT_END;
   const durationMinutes = input.durationMinutes ?? 150;
   const groupId = input.groupId ?? DEMO_GROUP_ID;
+  const personalBusyBlocks = input.busyBlocks ?? [];
   if (!Number.isInteger(durationMinutes) || durationMinutes < 15 || durationMinutes > 720) {
     throw new Error("durationMinutes must be an integer between 15 and 720.");
   }
@@ -76,20 +78,53 @@ export async function suggestHangout(input: SuggestRequest = {}): Promise<Sugges
   }
   if ((end - start) / 86_400_000 > 31) throw new Error("Search window cannot exceed 31 days.");
 
-  const evidence = await collectAgentEvidence(fixtureAgentContext, {
+  if (personalBusyBlocks.length > 500) throw new Error("At most 500 additional busy blocks can be submitted.");
+  for (const block of personalBusyBlocks) {
+    const blockStart = Date.parse(block.start);
+    const blockEnd = Date.parse(block.end);
+    if (
+      !userIds.includes(block.userId) ||
+      !Number.isFinite(blockStart) ||
+      !Number.isFinite(blockEnd) ||
+      blockEnd <= blockStart ||
+      !/(Z|[+-]\d{2}:?\d{2})$/i.test(block.start) ||
+      !/(Z|[+-]\d{2}:?\d{2})$/i.test(block.end)
+    ) {
+      throw new Error("Each additional busy block must have a selected user and valid timezone-aware start/end times.");
+    }
+  }
+
+  const context: AgentToolContext = {
+    ...fixtureAgentContext,
+    async getBusyBlocks(ids, rangeStart, rangeEnd) {
+      const fixtureBlocks = await fixtureAgentContext.getBusyBlocks(ids, rangeStart, rangeEnd);
+      const rangeStartMs = Date.parse(rangeStart);
+      const rangeEndMs = Date.parse(rangeEnd);
+      const additional = personalBusyBlocks
+        .filter((block) => ids.includes(block.userId) && Date.parse(block.start) < rangeEndMs && Date.parse(block.end) > rangeStartMs)
+        .map((block, index) => ({
+          id: `client-busy-${index}`,
+          userId: block.userId,
+          start: new Date(block.start).toISOString(),
+          end: new Date(block.end).toISOString(),
+        }));
+      return [...fixtureBlocks, ...additional];
+    },
+  };
+
+  const evidence = await collectAgentEvidence(context, {
     groupId,
     userIds,
     startIso: new Date(start).toISOString(),
     endIso: new Date(end).toISOString(),
     durationMinutes,
-    topic: "availability",
   });
   if (!evidence.users.length || evidence.users.length !== userIds.length) {
     throw new Error("Select valid users from the demo group.");
   }
   if (!evidence.candidates.length) throw new Error("No shared free slots were found for the selected users.");
 
-  const handlers = createAgentToolHandlers(fixtureAgentContext);
+  const handlers = createAgentToolHandlers(context);
   const prompt = `${suggestionPrompt({ groupId, userIds, startIso, endIso, durationMinutes })}\nEvidence already retrieved by the application:\n${JSON.stringify(evidence)}`;
   const result = await runGeminiAgent<ModelProposal>({
     prompt,
