@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -101,6 +102,7 @@ export function Dashboard() {
   const [personalBlocks, setPersonalBlocks] = useState<BusyBlock[]>([]);
   const [inviteeIds, setInviteeIds] = useState(() => new Set(defaultInvitees));
   const [hangout, setHangout] = useState<CreatedHangout | null>(null);
+  const [proposalSubmitted, setProposalSubmitted] = useState(false);
   const [proposalError, setProposalError] = useState("");
   const invitees = users.filter((user) => inviteeIds.has(user.id));
 
@@ -115,10 +117,12 @@ export function Dashboard() {
       return next;
     });
     setHangout(null);
+    setProposalSubmitted(false);
   }
 
   function createHangout() {
     setProposalError("");
+    setProposalSubmitted(false);
     if (invitees.length === 0) {
       setProposalError("Choose at least one person to invite.");
       return;
@@ -158,6 +162,11 @@ export function Dashboard() {
     });
   }
 
+  function submitProposal() {
+    // TODO: Persist the proposal and send an RSVP request to each invited attendee.
+    setProposalSubmitted(true);
+  }
+
   return (
     <div className="min-h-screen">
       <header className="border-b border-border bg-card/90">
@@ -168,7 +177,14 @@ export function Dashboard() {
             href="#"
           >
             <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-pink-soft text-deep">
-              <SparkleMark />
+              <Image
+                alt=""
+                className="h-8 w-8 object-contain"
+                height={83}
+                priority
+                src="/icon.png"
+                width={80}
+              />
             </span>
             <span className="text-base font-semibold tracking-tight">
               Where&apos;s Everyone?
@@ -333,9 +349,27 @@ export function Dashboard() {
                     </div>
                   </div>
                 )}
+                {hangout && (
+                  <>
+                    <button
+                      className="mt-4 flex w-full items-center justify-center rounded-xl bg-primary-action px-4 py-3 text-sm font-semibold text-primary-action-foreground transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-pink disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={proposalSubmitted}
+                      onClick={submitProposal}
+                      type="button"
+                    >
+                      {proposalSubmitted ? "Proposal submitted" : "Submit proposal"}
+                    </button>
+                    {proposalSubmitted && (
+                      <p className="mt-2 text-center text-xs text-muted-foreground" role="status">
+                        Demo only — RSVP delivery is not connected yet.
+                      </p>
+                    )}
+                  </>
+                )}
                 <p className="mt-3 text-xs leading-5 text-muted-foreground">
-                  No invitations are sent yet. You&apos;ll review the proposal
-                  before confirming.
+                  {proposalSubmitted
+                    ? "The proposal was marked as submitted in this demo."
+                    : "No invitations are sent until you submit the proposal."}
                 </p>
               </CardContent>
             </Card>
