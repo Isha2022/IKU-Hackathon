@@ -58,6 +58,7 @@ export function Dashboard() {
   const [personalBlocks, setPersonalBlocks] = useState<BusyBlock[]>([]);
   const [inviteeIds, setInviteeIds] = useState(() => new Set(defaultInvitees));
   const [hangout, setHangout] = useState<CreatedHangout | null>(null);
+  const [agentBeliefs, setAgentBeliefs] = useState<SuggestResponse["evidence"]["beliefs"]>(beliefs);
   const [proposalSubmitted, setProposalSubmitted] = useState(false);
   const [proposalError, setProposalError] = useState("");
   const [isProposing, setIsProposing] = useState(false);
@@ -75,6 +76,7 @@ export function Dashboard() {
     });
     setHangout(null);
     setProposalSubmitted(false);
+    setAgentBeliefs(beliefs);
   }
 
   async function createHangout() {

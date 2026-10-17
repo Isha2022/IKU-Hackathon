@@ -44,6 +44,7 @@ export async function runGeminiAgent<T>(input: {
     return { value: input.fallback(), toolCalls: [], usedFallback: true };
 
   const ai = new GoogleGenAI({ apiKey });
+  const model = process.env.GEMINI_MODEL?.trim() || "gemini-3.6-flash";
   const contents: Content[] = [
     { role: "user", parts: [{ text: input.prompt }] },
   ];
@@ -51,7 +52,7 @@ export async function runGeminiAgent<T>(input: {
   try {
     for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
       const response = await ai.models.generateContent({
-        model: process.env.GEMINI_MODEL ?? "gemini-3.8-flash",
+        model,
         contents,
         config: {
           systemInstruction: agentSystemPrompt,
