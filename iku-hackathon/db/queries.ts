@@ -1,5 +1,83 @@
 import { pool } from "./client";
-import type { AvailabilitySlot, IsoUtcString } from "../lib/types";
+import type {
+  AvailabilitySlot, BusyBlockSource, IsoUtcString, StoredBusyBlock,
+} from "../lib/types";
+
+import { validateWindow } from "./validation";
+
+interface BusyBlockRow {
+  id: string;
+  user_id: string;
+  start_time: Date;
+  end_time: Date;
+  source: BusyBlockSource;
+  external_uid: string | null;
+}
+
+function toBusyBlock(row: BusyBlockRow): StoredBusyBlock {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    start: row.start_time.toISOString(),
+    end: row.end_time.toISOString(),
+    source: row.source,
+    externalUid: row.external_uid,
+  };
+}
+
+/** Return full stored intervals overlapping [start, end), including overnight blocks. */
+export async function getBusyBlocks(
+  userIds: string[], start: IsoUtcString, end: IsoUtcString,
+): Promise<StoredBusyBlock[]> {
+  validateWindow(start, end);
+  if (!userIds.length) return [];
+  const { rows } = await pool.query<BusyBlockRow>(`
+    SELECT id, user_id, lower(during) AS start_time, upper(during) AS end_time,
+      source, external_uid
+    FROM busy_blocks
+    WHERE user_id = ANY($1::uuid[])
+      AND during && tstzrange($2::timestamptz, $3::timestamptz, '[)')
+    ORDER BY lower(during), id
+  `, [userIds, start, end]);
+  return rows.map(toBusyBlock);
+}
+
+/**
+ * Upsert by (user_id, external_uid): the latest import replaces the interval and
+ * source while preserving the record ID. This uses the existing partial unique
+ * index, so reimporting an ICS event cannot create duplicates for that user.
+ * UIDs are scoped to a user for every source; omitted UIDs always insert a new row.
+ */
+export async function createBusyBlock(
+  userId: string, start: IsoUtcString, end: IsoUtcString,
+  source: BusyBlockSource, externalUid?: string,
+): Promise<StoredBusyBlock> {
+  validateWindow(start, end);
+  if (!["ics", "manual", "confirmed_hangout"].includes(source)) {
+    throw new Error("Invalid busy block source");
+  }
+  if (externalUid !== undefined &&
+    (typeof externalUid !== "string" || !externalUid.trim())) {
+    throw new Error("externalUid must be a non-empty string when provided");
+  }
+  const { rows } = await pool.query<BusyBlockRow>(`
+    INSERT INTO busy_blocks (user_id, during, source, external_uid)
+    VALUES ($1::uuid, tstzrange($2::timestamptz, $3::timestamptz, '[)'), $4, $5)
+    ON CONFLICT (user_id, external_uid) WHERE external_uid IS NOT NULL
+    DO UPDATE SET during = EXCLUDED.during, source = EXCLUDED.source
+    RETURNING id, user_id, lower(during) AS start_time, upper(during) AS end_time,
+      source, external_uid
+  `, [userId, start, end, source, externalUid ?? null]);
+  return toBusyBlock(rows[0]);
+}
+
+/** Return false for both missing blocks and blocks belonging to another user. */
+export async function deleteBusyBlock(blockId: string, userId: string): Promise<boolean> {
+  const result = await pool.query(`
+    DELETE FROM busy_blocks WHERE id = $1::uuid AND user_id = $2::uuid
+  `, [blockId, userId]);
+  return (result.rowCount ?? 0) > 0;
+}
 
 /** Each interval is [start, end). Empty calendars are treated as free, not confirmed free. */
 export async function getAvailabilityHeatmap(

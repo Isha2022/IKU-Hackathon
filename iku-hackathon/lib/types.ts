@@ -20,6 +20,14 @@ export interface BusyBlock {
   end: IsoUtcString;
 }
 
+export type BusyBlockSource = "ics" | "manual" | "confirmed_hangout";
+
+/** Database metadata is separate so existing frontend BusyBlock fixtures remain valid. */
+export interface StoredBusyBlock extends BusyBlock {
+  source: BusyBlockSource;
+  externalUid: string | null;
+}
+
 export interface Proposal {
   slot: {
     start: IsoUtcString;
@@ -30,6 +38,63 @@ export interface Proposal {
   assumptions: string[];
   version: number;
   reasoning: string;
+}
+
+export type ProposalStatus = "proposed" | "superseded" | "confirmed" | "cancelled";
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+export type JsonObject = { [key: string]: JsonValue };
+
+export interface CreateProposalInput {
+  groupId: string;
+  slot: Proposal["slot"];
+  title: string;
+  attendees: string[];
+  activityType?: string | null;
+  venueText?: string | null;
+  reasoning: string;
+  assumptions?: string[];
+}
+
+export interface StoredProposal extends Proposal {
+  id: string;
+  threadId: string;
+  groupId: string;
+  activityType: string | null;
+  venueText: string | null;
+  status: ProposalStatus;
+  createdAt: IsoUtcString;
+}
+
+/** Include expectedVersion when revising a version displayed in the UI. */
+export type ProposalChanges = Partial<Omit<CreateProposalInput, "groupId" | "reasoning">> & {
+  reasoning: string;
+  expectedVersion?: number;
+};
+
+export type RsvpResponse = "yes" | "no" | "maybe";
+export interface RsvpEvent {
+  time: IsoUtcString;
+  proposalId: string;
+  userId: string;
+  response: RsvpResponse;
+  reason: string | null;
+  extractedEvidence: JsonObject;
+}
+
+export interface ProposalConstraintInput {
+  proposalId: string;
+  userId: string;
+  originalText: string;
+  constraintType: "not_before" | "not_after" | "indoor" | "other";
+  constraintValue: JsonValue;
+  scope?: "proposal" | "recurring";
+}
+
+export interface StoredProposalConstraint extends ProposalConstraintInput {
+  id: string;
+  scope: "proposal" | "recurring";
+  approvalStatus: "pending" | "approved" | "rejected";
+  createdAt: IsoUtcString;
 }
 
 export interface Belief {
@@ -46,6 +111,49 @@ export interface BeliefRevision {
   newConfidence: number;
   trigger: string;
   explanation: string;
+}
+
+export interface GroupMember extends User {
+  timezone: string;
+}
+
+export interface GroupPreference {
+  id: string;
+  groupId: string;
+  userId: string | null;
+  category: "activity" | "venue" | "time" | "budget" | "other";
+  value: string;
+  createdAt: IsoUtcString;
+}
+
+export type BeliefStatus = "active" | "revised" | "retired";
+export interface StoredBelief extends Omit<Belief, "subjectUserId"> {
+  groupId: string;
+  subjectUserId: string | null;
+  status: BeliefStatus;
+  evidence: JsonValue[];
+  updatedAt: IsoUtcString;
+}
+
+export interface CreateBeliefInput {
+  groupId: string;
+  subjectUserId?: string | null;
+  statement: string;
+  confidence: number;
+  evidence: JsonValue[];
+}
+
+export interface StoredBeliefRevision extends BeliefRevision {
+  proposalId: string | null;
+}
+
+export interface RecentRsvpEvidence extends RsvpEvent {
+  threadId: string;
+  proposalVersion: number;
+  proposalTitle: string;
+  slot: Proposal["slot"];
+  /** Stored constraints for this proposal version and user, not inferred from this event. */
+  constraints: StoredProposalConstraint[];
 }
 
 export interface AgentStep {
