@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Where's Everyone?",
+  title: "IdkUp2U",
   description: "Find a time for everyone to get together.",
 };
 
