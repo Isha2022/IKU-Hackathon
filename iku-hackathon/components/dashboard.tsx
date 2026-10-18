@@ -275,7 +275,7 @@ export function Dashboard() {
       <header className="border-b border-border bg-card/90">
         <div className="mx-auto flex h-[72px] max-w-[1440px] items-center justify-between px-4 sm:px-6 lg:px-8">
           <a
-            aria-label="Where's Everyone? home"
+            aria-label="IdkUp2U home"
             className="flex items-center gap-3"
             href="#"
           >
@@ -290,7 +290,7 @@ export function Dashboard() {
               />
             </span>
             <span className="text-base font-semibold tracking-tight">
-              Where&apos;s Everyone?
+              IdkUp2U
             </span>
           </a>
           <div className="flex items-center gap-3">
