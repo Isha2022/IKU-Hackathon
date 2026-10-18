@@ -346,7 +346,7 @@ export function WeekCalendar({
         {view === "personal" ? (
           <div className="space-y-4 rounded-xl border border-pink/50 bg-personal-wash p-4">
             <div>
-              <p className="text-sm font-semibold text-deep">Yonna&apos;s busy times</p>
+              <p className="text-sm font-semibold text-deep">Your busy times</p>
               <p className="mt-0.5 text-xs text-muted-foreground">
                 Private to your calendar. Only free/busy is shared with the group.
               </p>
