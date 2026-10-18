@@ -65,6 +65,14 @@ export interface StoredProposal extends Proposal {
   createdAt: IsoUtcString;
 }
 
+export interface StoredProposalInvitation {
+  proposal: StoredProposal;
+  recipientUserId: string;
+  recipientName: string;
+  sentAt: IsoUtcString;
+  response: RsvpResponse | null;
+}
+
 /** Include expectedVersion when revising a version displayed in the UI. */
 export type ProposalChanges = Partial<Omit<CreateProposalInput, "groupId" | "reasoning">> & {
   reasoning: string;

@@ -4,11 +4,15 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "demo": "tsx scripts/demo.ts",
+    "seed:demo-invitation": "node --conditions=react-server --import tsx scripts/seed-demo-invitation.ts",
+    "unseed:demo-invitation": "node --conditions=react-server --import tsx scripts/unseed-demo-invitation.ts",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
+    "@google/genai": "^2.30.0",
     "next": "16.4.2",
     "pg": "^8.23.1",
     "react": "19.3.0",
