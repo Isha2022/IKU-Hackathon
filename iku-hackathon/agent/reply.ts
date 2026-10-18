@@ -1,4 +1,4 @@
-import type { Proposal } from "../lib/types";
+import { chooseReplyFallback } from "./reply-fallback";
 import type { ExtractedConstraint, ReplyRequest, ReplyResponse } from "../types/contracts";
 import { collectAgentEvidence, createAgentToolHandlers, executeAgentTool } from "./handlers";
 import { runGeminiAgent } from "./loop";
@@ -134,26 +134,6 @@ function getTimeValue(constraints: ExtractedConstraint[], kind: "after_time" | "
   return match ? Number(match[1]) * 60 + Number(match[2]) : undefined;
 }
 
-function chooseFallback(
-  candidates: Array<{ start: string; end: string; freeUserIds: string[] }>,
-  constraints: ExtractedConstraint[],
-): ModelProposal {
-  const slot = candidates[0];
-  if (!slot) throw new Error("No candidate slots satisfy the reply constraints.");
-  const venue = constraints.find((item) => item.kind === "venue")?.value;
-  const requestedActivity = constraints.find((item) => item.kind === "activity")?.value.trim();
-  const indoors = venue?.toLowerCase().includes("indoor");
-  const activity = requestedActivity || (indoors ? "an indoor cafe catch-up" : "a relaxed group catch-up");
-  return {
-    start: slot.start,
-    end: slot.end,
-    title: requestedActivity ? requestedActivity.replace(/^\w/, (letter) => letter.toUpperCase()) : indoors ? "Indoor cafe catch-up" : "A relaxed group catch-up",
-    activity,
-    reasoning: "This revision uses a deterministic slot that satisfies the recorded proposal constraints.",
-    assumptions: ["Calendar availability indicates no recorded conflict; attendees still need to confirm."],
-  };
-}
-
 function validateModelProposal(
   value: unknown,
   candidates: Array<{ start: string; end: string; freeUserIds: string[] }>,
@@ -216,20 +196,25 @@ export async function processReply(input: ReplyRequest): Promise<ReplyResponse> 
   const after = getTimeValue(constraints, "after_time");
   const before = getTimeValue(constraints, "before_time");
   const relevantConstraints = constraints.filter((constraint) => constraint.scope === "proposal");
-  const candidates = evidence.candidates.filter((slot) => {
+  const matchingCandidates = evidence.candidates.filter((slot) => {
     const local = londonTime(slot.start);
     if (after !== undefined && local.minute < after) return false;
     if (before !== undefined && local.minute > before) return false;
     if (relevantConstraints.some((constraint) => constraint.kind === "unavailable" && slotMatchesUnavailable(constraint.value, slot.start))) return false;
     return true;
   });
+  // A decline should offer a different time when the filtered list permits it.
+  const alternatives = matchingCandidates.filter(slot =>
+    slot.start !== previousProposal.slot.start || slot.end !== previousProposal.slot.end);
+  const candidates = interpretation.response === "declined" && alternatives.length
+    ? alternatives : matchingCandidates;
   if (!candidates.length && (after !== undefined || before !== undefined || relevantConstraints.some((item) => item.kind === "unavailable"))) {
     throw new Error("No shared candidate slots satisfy the new scheduling constraint.");
   }
 
   let revised = previousProposal;
   let usedFallback = interpretationResult?.usedFallback ?? false;
-  if (candidates.length && relevantConstraints.length) {
+  if (candidates.length && (relevantConstraints.length || interpretation.response === "declined")) {
     const narrowedEvidence = { ...evidence, candidates };
     const revisionPrompt = `${suggestionPrompt({
       groupId: previousProposal.groupId,
@@ -242,14 +227,14 @@ export async function processReply(input: ReplyRequest): Promise<ReplyResponse> 
       prompt: revisionPrompt,
       responseSchema: proposalResponseSchema,
       executeTool: (name, args) => executeAgentTool(handlers, name, args),
-      fallback: () => chooseFallback(candidates, relevantConstraints),
+      fallback: () => chooseReplyFallback(candidates, relevantConstraints),
     });
     usedFallback ||= revision.usedFallback;
     let chosen: ModelProposal;
     try {
       chosen = revision.usedFallback ? revision.value : validateModelProposal(revision.value, candidates);
     } catch {
-      chosen = chooseFallback(candidates, relevantConstraints);
+      chosen = chooseReplyFallback(candidates, relevantConstraints);
       usedFallback = true;
     }
     const changed = chosen.start !== previousProposal.slot.start || chosen.end !== previousProposal.slot.end ||
