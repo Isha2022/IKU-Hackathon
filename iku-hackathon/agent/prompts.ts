@@ -20,4 +20,4 @@ export const replyPrompt = (input: {
 }) => `Interpret this reply to the current hangout proposal. Group: ${input.groupId}.
 Current proposal: ${JSON.stringify(input.proposal)}
 Reply from ${input.userName}: ${JSON.stringify(input.message)}
-Classify it as accepted, declined, or commented. Extract constraints and preserve the reply's exact evidence. Apply constraints to this proposal only unless the person clearly says they recur. Make no claims or writes. Return the required structured JSON.`;
+ Classify it as accepted, declined, or commented. Extract constraints and preserve the reply's exact evidence. Apply constraints to this proposal only unless the person clearly says they recur. If the reply declines but suggests a different activity or event idea, extract that suggestion as an activity constraint so the proposal can be revised. Preserve the difference between a scheduling conflict and an activity preference. Make no claims or writes. Return the required structured JSON.`;

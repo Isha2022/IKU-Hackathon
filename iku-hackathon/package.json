@@ -5,6 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "demo": "tsx scripts/demo.ts",
+    "seed:demo-invitation": "node --conditions=react-server --import tsx scripts/seed-demo-invitation.ts",
+    "unseed:demo-invitation": "node --conditions=react-server --import tsx scripts/unseed-demo-invitation.ts",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"

@@ -6,7 +6,7 @@ import { replyPrompt, suggestionPrompt } from "./prompts";
 import { proposalResponseSchema, replyInterpretationSchema } from "./schemas";
 import { databaseAgentContext } from "../lib/agent/database-context";
 import { getGroupMembers } from "../db/context";
-import { getLatestProposal, getRsvpHistory, recordRsvp, reviseProposal, saveProposalConstraint } from "../db/proposals";
+import { confirmProposalIfAllInvitedAccepted, getLatestProposal, isProposalRecipient, recordRsvp, reviseProposal, saveProposalConstraint } from "../db/proposals";
 
 interface ReplyInterpretation {
   response: "accepted" | "declined" | "commented";
@@ -41,14 +41,20 @@ function deterministicInterpretation(message: string): ReplyInterpretation {
   if (before) constraints.push({ kind: "before_time", value: timeValue(before), scope, confidence: 0.8, evidence: message });
   if (/\bindoor\b/.test(text)) constraints.push({ kind: "venue", value: "indoor", scope, confidence: 0.78, evidence: message });
   if (/\b(outdoors?|outside)\b/.test(text)) constraints.push({ kind: "venue", value: "outdoor", scope, confidence: 0.78, evidence: message });
+  const alternative = text.match(/\b(?:how about|what about|could we|can we|maybe we could|maybe we can|let's|lets|instead(?: of)?|rather than|i'd prefer|i would prefer)\s+(?:(?:we|do|try|go to|doing|trying|going to)\s+)?([^.!?]+)/i)?.[1]
+    ?.replace(/\b(?:instead|instead of that)\b/gi, "")
+    .trim();
+  if (alternative && alternative.length >= 2) {
+    constraints.push({ kind: "activity", value: alternative, scope, confidence: 0.75, evidence: message });
+  }
   if (/\b(can't|cannot|won't|working|shift|busy|unavailable)\b/.test(text)) {
     constraints.push({ kind: "unavailable", value: message, scope, confidence: 0.72, evidence: message });
   }
-  if (/\b(yes|accept(?:ed)?|sounds good|count me in|i'm in)\b/.test(text) && constraints.length === 0) {
-    return { response: "accepted", constraints: [], summary: "The reply accepts the proposal." };
+  if (/\b(no|decline|can't make|cannot make|won't make|not free|unavailable)\b/.test(text)) {
+    return { response: "declined", constraints, summary: "The reply declines the proposal." };
   }
-  if (/\b(no|decline|can't make|cannot make|won't make)\b/.test(text) && constraints.length === 0) {
-    return { response: "declined", constraints: [], summary: "The reply declines the proposal." };
+  if (/\b(yes|accept(?:ed)?|sounds good|count me in|i'm in)\b/.test(text)) {
+    return { response: "accepted", constraints, summary: "The reply accepts the proposal." };
   }
   return { response: constraints.length ? "commented" : "commented", constraints, summary: "Recorded the reply for this proposal." };
 }
@@ -76,8 +82,16 @@ function normalizeInterpretation(value: unknown, message: string): ReplyInterpre
       evidence: message,
     }];
   });
+  const deterministic = deterministicInterpretation(message);
+  for (const extracted of deterministic.constraints) {
+    if (!constraints.some((item) => item.kind === extracted.kind && item.value === extracted.value)) {
+      constraints.push(extracted);
+    }
+  }
   return {
-    response: parsed.response as ReplyInterpretation["response"],
+    response: deterministic.response === "declined" || deterministic.response === "accepted"
+      ? deterministic.response
+      : parsed.response as ReplyInterpretation["response"],
     constraints,
     summary: typeof parsed.summary === "string" ? parsed.summary : "Recorded the reply.",
   };
@@ -127,12 +141,13 @@ function chooseFallback(
   const slot = candidates[0];
   if (!slot) throw new Error("No candidate slots satisfy the reply constraints.");
   const venue = constraints.find((item) => item.kind === "venue")?.value;
+  const requestedActivity = constraints.find((item) => item.kind === "activity")?.value.trim();
   const indoors = venue?.toLowerCase().includes("indoor");
-  const activity = indoors ? "an indoor cafe catch-up" : "a relaxed group catch-up";
+  const activity = requestedActivity || (indoors ? "an indoor cafe catch-up" : "a relaxed group catch-up");
   return {
     start: slot.start,
     end: slot.end,
-    title: indoors ? "Indoor cafe catch-up" : "A relaxed group catch-up",
+    title: requestedActivity ? requestedActivity.replace(/^\w/, (letter) => letter.toUpperCase()) : indoors ? "Indoor cafe catch-up" : "A relaxed group catch-up",
     activity,
     reasoning: "This revision uses a deterministic slot that satisfies the recorded proposal constraints.",
     assumptions: ["Calendar availability indicates no recorded conflict; attendees still need to confirm."],
@@ -164,20 +179,26 @@ export async function processReply(input: ReplyRequest): Promise<ReplyResponse> 
   if (input.proposalVersion !== previousProposal.version) {
     throw new Error(`Stale proposal version. Current version is ${previousProposal.version}.`);
   }
+  if (previousProposal.status !== "proposed") throw new Error("Only an active proposed invitation can receive a reply.");
   const message = input.message.trim();
   if (!message || message.length > 2000) throw new Error("Reply message must contain 1 to 2000 characters.");
-  if (!previousProposal.attendees.includes(input.userId)) throw new Error("Only proposal attendees can reply.");
+  if (!previousProposal.attendees.includes(input.userId) || !(await isProposalRecipient(previousProposal.id, input.userId))) {
+    throw new Error("Only an invited recipient can reply.");
+  }
   const user = (await getGroupMembers(previousProposal.groupId)).find((member) => member.id === input.userId);
   if (!user) throw new Error("Unknown group member.");
 
   const handlers = createAgentToolHandlers(databaseAgentContext);
-  const interpretationResult = await runGeminiAgent<ReplyInterpretation>({
+  const interpretationResult = input.response === "accepted" ? null : await runGeminiAgent<ReplyInterpretation>({
     prompt: replyPrompt({ groupId: previousProposal.groupId, proposal: previousProposal, userName: user.name, message }),
     responseSchema: replyInterpretationSchema,
     executeTool: (name, args) => executeAgentTool(handlers, name, args),
     fallback: () => deterministicInterpretation(message),
   });
-  const interpretation = normalizeInterpretation(interpretationResult.value, message);
+  const parsedInterpretation = interpretationResult
+    ? normalizeInterpretation(interpretationResult.value, message)
+    : { response: "accepted" as const, constraints: [], summary: "Invitation accepted." };
+  const interpretation = input.response ? { ...parsedInterpretation, response: input.response } : parsedInterpretation;
   const receivedAt = input.receivedAt && Number.isFinite(Date.parse(input.receivedAt))
     ? new Date(input.receivedAt).toISOString()
     : new Date().toISOString();
@@ -207,7 +228,7 @@ export async function processReply(input: ReplyRequest): Promise<ReplyResponse> 
   }
 
   let revised = previousProposal;
-  let usedFallback = interpretationResult.usedFallback;
+  let usedFallback = interpretationResult?.usedFallback ?? false;
   if (candidates.length && relevantConstraints.length) {
     const narrowedEvidence = { ...evidence, candidates };
     const revisionPrompt = `${suggestionPrompt({
@@ -231,7 +252,8 @@ export async function processReply(input: ReplyRequest): Promise<ReplyResponse> 
       chosen = chooseFallback(candidates, relevantConstraints);
       usedFallback = true;
     }
-    const changed = chosen.start !== previousProposal.slot.start || chosen.end !== previousProposal.slot.end || chosen.title !== previousProposal.title;
+    const changed = chosen.start !== previousProposal.slot.start || chosen.end !== previousProposal.slot.end ||
+      chosen.title !== previousProposal.title || chosen.activity !== previousProposal.activityType;
     if (changed) {
       revised = await reviseProposal(threadId, {
         expectedVersion: previousProposal.version,
@@ -272,16 +294,21 @@ export async function processReply(input: ReplyRequest): Promise<ReplyResponse> 
     message,
     receivedAt: rsvpEvent.time,
   } as const;
-  const latestRsvps = await getRsvpHistory(revised.id);
-  const readyForConfirmation = revised.attendees.length > 0 && revised.attendees.every((attendeeId) =>
-    latestRsvps.filter((event) => event.userId === attendeeId).at(-1)?.response === "yes");
+  let readyForConfirmation = false;
+  if (interpretation.response === "accepted" && revised.id === previousProposal.id) {
+    const confirmation = await confirmProposalIfAllInvitedAccepted(threadId, previousProposal.version);
+    revised = confirmation.proposal;
+    readyForConfirmation = confirmation.confirmed;
+  }
 
   return {
     rsvp,
     constraints,
     proposal: revised,
     previousProposal,
-    explanation: revised.version === previousProposal.version
+    explanation: readyForConfirmation
+      ? "All invitees accepted. The hangout is confirmed."
+      : revised.version === previousProposal.version
       ? interpretation.summary
       : `${interpretation.summary} Updated the proposal to ${revised.title} because of the new constraint.`,
     evidence: { ...evidence, candidates, rsvps: [...evidence.rsvps, rsvp] },

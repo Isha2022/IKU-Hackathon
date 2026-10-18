@@ -13,7 +13,8 @@ export async function POST(request: Request): Promise<Response> {
     typeof body !== "object" ||
     !Number.isInteger(body.proposalVersion) ||
     typeof body.userId !== "string" ||
-    typeof body.message !== "string"
+    typeof body.message !== "string" ||
+    (body.response !== undefined && body.response !== "accepted" && body.response !== "declined")
   ) {
     return Response.json({ error: "Expected proposalVersion, userId, and message." }, { status: 400 });
   }

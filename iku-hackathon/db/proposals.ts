@@ -7,7 +7,7 @@ import { uuid, text, json, transaction } from "./internal";
 import type {
   CreateProposalInput, JsonObject, ProposalChanges,
   ProposalConstraintInput, RsvpEvent, RsvpResponse, StoredProposal,
-  StoredProposalConstraint,
+  StoredProposalConstraint, StoredProposalInvitation,
 } from "../lib/types";
 
 function validateProposal(input: CreateProposalInput): void {
@@ -111,6 +111,140 @@ export async function reviseProposal(threadId: string, changes: ProposalChanges)
     const next = await insertProposal(client, input, previous.threadId, previous.version + 1);
     await client.query("UPDATE proposals SET status = 'superseded' WHERE id = $1::uuid", [previous.id]);
     return next;
+  });
+}
+
+/** Persist in-app invitations for the latest proposed version, excluding its sender. */
+export async function submitProposal(
+  threadId: string, expectedVersion: number, senderUserId: string,
+): Promise<{ proposal: StoredProposal; invitations: StoredProposalInvitation[] }> {
+  uuid(threadId); uuid(senderUserId);
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 1) throw new Error("Invalid proposalVersion");
+  return transaction(async client => {
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text, 0))", [threadId]);
+    const { rows } = await client.query<ProposalRow>(`
+      SELECT ${proposalColumns} FROM proposals WHERE thread_id = $1::uuid
+      ORDER BY version DESC LIMIT 1 FOR UPDATE
+    `, [threadId]);
+    if (!rows[0]) throw new Error("Proposal thread not found");
+    const current = proposal(rows[0]);
+    if (current.version !== expectedVersion) throw new Error("Proposal version conflict: reload the latest proposal");
+    if (current.status !== "proposed") throw new Error("Only a proposed hangout can be sent");
+
+    const senderMembership = await client.query(`
+      SELECT 1 FROM group_members WHERE group_id = $1::uuid AND user_id = $2::uuid
+    `, [current.groupId, senderUserId]);
+    if (!senderMembership.rows.length) throw new Error("Invitation sender must belong to the group");
+    const recipientIds = current.attendees.filter((id) => id !== senderUserId);
+    if (!recipientIds.length) throw new Error("Select at least one attendee other than yourself");
+
+    await client.query(`
+      INSERT INTO proposal_invitations (proposal_id, recipient_user_id)
+      SELECT $1::uuid, recipient_id FROM unnest($2::uuid[]) AS recipient_id
+      ON CONFLICT (proposal_id, recipient_user_id) DO NOTHING
+    `, [current.id, recipientIds]);
+    const invitations = await client.query<{ recipientUserId: string; recipientName: string; sentAt: Date }>(`
+      SELECT i.recipient_user_id AS "recipientUserId", u.name AS "recipientName", i.sent_at AS "sentAt"
+      FROM proposal_invitations i JOIN users u ON u.id = i.recipient_user_id
+      WHERE i.proposal_id = $1::uuid ORDER BY u.name, u.id
+    `, [current.id]);
+    return {
+      proposal: current,
+      invitations: invitations.rows.map((row) => ({
+        proposal: current,
+        recipientUserId: row.recipientUserId,
+        recipientName: row.recipientName,
+        sentAt: row.sentAt.toISOString(),
+        response: null,
+      })),
+    };
+  });
+}
+
+/** Return the current in-app invitations visible to the whole demo group. */
+export async function getGroupInvitations(groupId: string): Promise<StoredProposalInvitation[]> {
+  uuid(groupId);
+  type Row = ProposalRow & { recipientUserId: string; recipientName: string; sentAt: Date; response: RsvpResponse | null };
+  const { rows } = await pool.query<Row>(`
+    SELECT p.id, p.thread_id AS "threadId", p.group_id AS "groupId", p.version,
+      lower(p.during) AS start, upper(p.during) AS end, p.title,
+      p.activity_type AS "activityType", p.venue_text AS "venueText", p.attendee_ids AS attendees,
+      p.status, COALESCE(p.reasoning, '') AS reasoning, p.assumptions, p.created_at AS "createdAt",
+      i.recipient_user_id AS "recipientUserId", u.name AS "recipientName", i.sent_at AS "sentAt",
+      latest.response
+    FROM proposal_invitations i
+    JOIN proposals p ON p.id = i.proposal_id
+    JOIN users u ON u.id = i.recipient_user_id
+    LEFT JOIN LATERAL (
+      SELECT event.response FROM rsvp_events event
+      WHERE event.proposal_id = i.proposal_id AND event.user_id = i.recipient_user_id
+      ORDER BY event.time DESC LIMIT 1
+    ) latest ON TRUE
+    WHERE p.group_id = $1::uuid AND p.status IN ('proposed', 'confirmed')
+      AND p.version = (SELECT max(latest.version) FROM proposals latest WHERE latest.thread_id = p.thread_id)
+    ORDER BY i.sent_at DESC, p.created_at DESC, u.name
+  `, [groupId]);
+  return rows.map((row) => {
+    const { recipientUserId, recipientName, sentAt, response, ...proposalRow } = row;
+    return {
+      proposal: proposal(proposalRow),
+      recipientUserId,
+      recipientName,
+      sentAt: sentAt.toISOString(),
+      response,
+    };
+  });
+}
+
+/** Only a saved invitation recipient may respond to that proposal. */
+export async function isProposalRecipient(proposalId: string, userId: string): Promise<boolean> {
+  uuid(proposalId); uuid(userId);
+  const { rows } = await pool.query(`
+    SELECT 1 FROM proposal_invitations
+    WHERE proposal_id = $1::uuid AND recipient_user_id = $2::uuid
+  `, [proposalId, userId]);
+  return rows.length > 0;
+}
+
+/** Confirm the current proposal when every persisted invitee's latest RSVP is yes. */
+export async function confirmProposalIfAllInvitedAccepted(
+  threadId: string, expectedVersion: number,
+): Promise<{ proposal: StoredProposal; confirmed: boolean }> {
+  uuid(threadId);
+  return transaction(async (client) => {
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text, 0))", [threadId]);
+    const { rows } = await client.query<ProposalRow>(`
+      SELECT ${proposalColumns} FROM proposals WHERE thread_id = $1::uuid
+      ORDER BY version DESC LIMIT 1 FOR UPDATE
+    `, [threadId]);
+    if (!rows[0]) throw new Error("Proposal thread not found");
+    let current = proposal(rows[0]);
+    if (current.version !== expectedVersion) throw new Error("Proposal version conflict: reload the latest proposal");
+    if (current.status === "confirmed") return { proposal: current, confirmed: true };
+    if (current.status !== "proposed") return { proposal: current, confirmed: false };
+
+    const result = await client.query<{ inviteeCount: number; acceptedCount: number }>(`
+      SELECT count(*)::int AS "inviteeCount",
+        count(*) FILTER (WHERE latest.response = 'yes')::int AS "acceptedCount"
+      FROM proposal_invitations i
+      LEFT JOIN LATERAL (
+        SELECT event.response FROM rsvp_events event
+        WHERE event.proposal_id = i.proposal_id AND event.user_id = i.recipient_user_id
+        ORDER BY event.time DESC LIMIT 1
+      ) latest ON TRUE
+      WHERE i.proposal_id = $1::uuid
+    `, [current.id]);
+    const counts = result.rows[0];
+    if (!counts || counts.inviteeCount === 0 || counts.acceptedCount !== counts.inviteeCount) {
+      return { proposal: current, confirmed: false };
+    }
+
+    const updated = await client.query<ProposalRow>(`
+      UPDATE proposals SET status = 'confirmed' WHERE id = $1::uuid
+      RETURNING ${proposalColumns}
+    `, [current.id]);
+    current = proposal(updated.rows[0]);
+    return { proposal: current, confirmed: true };
   });
 }
 

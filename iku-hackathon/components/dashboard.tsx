@@ -12,10 +12,10 @@ import {
 } from "@/components/ui/card";
 import { ConfidenceBar } from "@/components/ui/confidence-bar";
 import { WeekCalendar, type CalendarView } from "@/components/week-calendar";
-import type { Belief, BusyBlock, Proposal, User } from "@/lib/types";
-import type { SuggestResponse } from "@/types/contracts";
+import type { Belief, BusyBlock, StoredProposal, StoredProposalInvitation, User } from "@/lib/types";
+import type { ReplyResponse, SuggestResponse, SubmitInvitationResponse } from "@/types/contracts";
 
-type CreatedHangout = Proposal & { threadId: string; usedFallback: boolean };
+type CreatedHangout = StoredProposal & { usedFallback: boolean };
 type BusyBlockDraft = BusyBlock & { externalUid?: string };
 
 function formatSlot(start: string, end: string): string {
@@ -60,6 +60,12 @@ export function Dashboard() {
   const [personalBlocks, setPersonalBlocks] = useState<BusyBlock[]>([]);
   const [inviteeIds, setInviteeIds] = useState(() => new Set<string>());
   const [hangout, setHangout] = useState<CreatedHangout | null>(null);
+  const [groupInvitations, setGroupInvitations] = useState<StoredProposalInvitation[]>([]);
+  const [isSendingInvitation, setIsSendingInvitation] = useState(false);
+  const [isSendingReply, setIsSendingReply] = useState(false);
+  const [replyUserId, setReplyUserId] = useState("");
+  const [replyMessage, setReplyMessage] = useState("");
+  const [replyStatus, setReplyStatus] = useState("");
   const [baseBeliefs, setBaseBeliefs] = useState<SuggestResponse["evidence"]["beliefs"]>([]);
   const [agentBeliefs, setAgentBeliefs] = useState<SuggestResponse["evidence"]["beliefs"]>([]);
   const [proposalError, setProposalError] = useState("");
@@ -91,6 +97,32 @@ export function Dashboard() {
     return () => { active = false; };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    fetch("/api/agent/invitations")
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error ?? "Unable to load invitations.");
+        return data as { invitations: StoredProposalInvitation[] };
+      })
+      .then((data) => { if (active) setGroupInvitations(data.invitations); })
+      .catch(() => { if (active) setGroupInvitations([]); });
+    return () => { active = false; };
+  }, []);
+
+  const senderUserId = users.find((user) => user.name === "You")?.id ?? users[0]?.id ?? "";
+  const activeInvitationRecipients = hangout
+    ? groupInvitations.filter((item) => item.proposal.id === hangout.id).map((item) => item.recipientUserId)
+    : [];
+  const invitationSent = activeInvitationRecipients.length > 0;
+  const replyRecipients = invitationSent
+    ? activeInvitationRecipients
+    : hangout?.attendees.filter((id) => id !== senderUserId) ?? [];
+  const selectedInvitation = hangout
+    ? groupInvitations.find((item) => item.proposal.id === hangout.id && item.recipientUserId === replyUserId)
+    : undefined;
+  const hasResponded = Boolean(selectedInvitation?.response || hangout?.status === "confirmed");
+
   function toggleInvitee(userId: string) {
     setInviteeIds((current) => {
       const next = new Set(current);
@@ -103,6 +135,7 @@ export function Dashboard() {
     });
     setHangout(null);
     setAgentBeliefs(baseBeliefs);
+    setReplyStatus("");
   }
 
   async function persistCalendarBlocks(blocks: BusyBlockDraft[], source: "manual" | "ics") {
@@ -152,9 +185,11 @@ export function Dashboard() {
       }
       setHangout({
         ...result.proposal,
-        threadId: result.threadId,
         usedFallback: result.usedFallback,
       });
+      setReplyUserId(invitees.find((user) => user.id !== senderUserId)?.id ?? "");
+      setReplyMessage("");
+      setReplyStatus("");
       setAgentBeliefs(result.evidence.beliefs);
     } catch (error) {
       setProposalError(
@@ -164,6 +199,74 @@ export function Dashboard() {
       );
     } finally {
       setIsProposing(false);
+    }
+  }
+
+  async function sendInvitation() {
+    if (!hangout || !senderUserId) return;
+    setProposalError("");
+    setIsSendingInvitation(true);
+    try {
+      const response = await fetch("/api/agent/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          threadId: hangout.threadId,
+          proposalVersion: hangout.version,
+          senderUserId,
+        }),
+      });
+      const result = await response.json() as SubmitInvitationResponse | { error?: string };
+      if (!response.ok || !("invitations" in result)) {
+        throw new Error("error" in result && result.error ? result.error : "Unable to send the invitation.");
+      }
+      setGroupInvitations(result.invitations);
+      setReplyStatus(`Invitation added to the in-app inbox for ${result.invitations.map((item) => item.recipientName).join(", ")}.`);
+    } catch (error) {
+      setProposalError(error instanceof Error ? error.message : "Unable to send the invitation.");
+    } finally {
+      setIsSendingInvitation(false);
+    }
+  }
+
+  async function sendReply(responseType: "accepted" | "declined") {
+    if (!hangout || !replyUserId) return;
+    setProposalError("");
+    setIsSendingReply(true);
+    const message = responseType === "accepted"
+      ? "I accept this invitation."
+      : replyMessage.trim() || "I can't make this invitation.";
+    try {
+      const response = await fetch("/api/agent/reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          threadId: hangout.threadId,
+          proposalVersion: hangout.version,
+          userId: replyUserId,
+          response: responseType,
+          message,
+        }),
+      });
+      const result = await response.json() as ReplyResponse | { error?: string };
+      if (!response.ok || !("proposal" in result)) {
+        throw new Error("error" in result && result.error ? result.error : "Unable to process the reply.");
+      }
+      setHangout({ ...result.proposal, usedFallback: result.usedFallback });
+      setAgentBeliefs(result.evidence.beliefs);
+      setReplyStatus(result.proposal.version > result.previousProposal.version
+        ? `${result.explanation} Review the revised idea, then send it as a new invitation.`
+        : result.explanation);
+      setReplyMessage("");
+      const invitationsResponse = await fetch("/api/agent/invitations");
+      if (invitationsResponse.ok) {
+        const data = await invitationsResponse.json() as { invitations: StoredProposalInvitation[] };
+        setGroupInvitations(data.invitations);
+      }
+    } catch (error) {
+      setProposalError(error instanceof Error ? error.message : "Unable to process the reply.");
+    } finally {
+      setIsSendingReply(false);
     }
   }
 
@@ -248,8 +351,7 @@ export function Dashboard() {
                   <CardTitle>Propose a hangout</CardTitle>
                   {hangout && (
                     <Badge variant="secondary">
-                      {hangout.usedFallback ? "Fallback saved" : "Saved"} · v
-                      {hangout.version}
+                      {hangout.status === "confirmed" ? "Confirmed" : invitationSent ? "Invitation sent" : hangout.usedFallback ? "Fallback saved" : "Saved"} · v{hangout.version}
                     </Badge>
                   )}
                 </div>
@@ -354,12 +456,106 @@ export function Dashboard() {
                   </div>
                 )}
                 {hangout && (
-                  <p className="mt-3 text-xs leading-5 text-muted-foreground">
-                    This proposal is saved to the group database. Invitation delivery is not connected yet.
-                  </p>
+                  <div className="mt-4 space-y-3">
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      Invitations appear in the group&apos;s in-app inbox. This does not send email or push notifications.
+                    </p>
+                    <button
+                      className="flex w-full items-center justify-center rounded-xl border border-pink px-4 py-3 text-sm font-semibold text-deep transition-colors hover:bg-pink-soft disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={isSendingInvitation || invitationSent || replyRecipients.length === 0}
+                      onClick={sendInvitation}
+                      type="button"
+                    >
+                      {isSendingInvitation ? "Sending invitation…" : invitationSent ? "Invitation sent" : "Send invitation"}
+                    </button>
+                    {replyStatus && <p className="text-sm text-deep" role="status">{replyStatus}</p>}
+                  </div>
                 )}
               </CardContent>
             </Card>
+
+            {hangout && invitationSent && replyRecipients.length > 0 && !hasResponded && hangout.status === "proposed" && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Reply to this invitation</CardTitle>
+                  <CardDescription>
+                    Accept, or decline and tell the agent what you would prefer.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <label className="block text-sm font-medium" htmlFor="reply-message">If declining, share an alternative idea (optional)</label>
+                  <textarea
+                    className="min-h-24 w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-sm"
+                    id="reply-message"
+                    onChange={(event) => setReplyMessage(event.target.value)}
+                    placeholder="I can’t make that time, but could we do brunch instead?"
+                    value={replyMessage}
+                  />
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      className="rounded-xl bg-availability px-4 py-3 text-sm font-semibold text-deep transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={isSendingReply}
+                      onClick={() => sendReply("accepted")}
+                      type="button"
+                    >
+                      {isSendingReply ? "Sending…" : "Accept"}
+                    </button>
+                    <button
+                      className="rounded-xl border border-pink px-4 py-3 text-sm font-semibold text-deep transition-colors hover:bg-pink-soft disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={isSendingReply}
+                      onClick={() => sendReply("declined")}
+                      type="button"
+                    >
+                      {isSendingReply ? "Sending…" : "Decline"}
+                    </button>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {groupInvitations.length > 0 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Group invitations</CardTitle>
+                  <CardDescription>Proposals sent to this group in the app.</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <ul className="divide-y divide-border">
+                    {groupInvitations.map((invitation) => (
+                      <li className="py-3 first:pt-0 last:pb-0" key={`${invitation.proposal.id}-${invitation.recipientUserId}`}>
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-semibold">{invitation.proposal.title}</p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {formatSlot(invitation.proposal.slot.start, invitation.proposal.slot.end)} · for {invitation.recipientName}
+                            </p>
+                          </div>
+                          {invitation.proposal.status === "proposed" && !invitation.response ? (
+                            <button
+                              className="shrink-0 rounded-lg border border-pink px-3 py-2 text-xs font-semibold text-deep hover:bg-pink-soft"
+                              onClick={() => {
+                                setHangout({ ...invitation.proposal, usedFallback: false });
+                                setReplyUserId(invitation.recipientUserId);
+                                setReplyMessage("");
+                                setReplyStatus("");
+                                setProposalError("");
+                              }}
+                              type="button"
+                            >
+                              Respond
+                            </button>
+                          ) : (
+                            <Badge variant="secondary">
+                              {invitation.proposal.status === "confirmed" ? "Confirmed" : invitation.response === "yes" ? "Accepted" : invitation.response === "no" ? "Declined" : "Awaiting reply"}
+                            </Badge>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </CardContent>
+              </Card>
+            )}
 
             <Card>
               <CardHeader>
