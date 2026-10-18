@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -12,13 +12,11 @@ import {
 } from "@/components/ui/card";
 import { ConfidenceBar } from "@/components/ui/confidence-bar";
 import { WeekCalendar, type CalendarView } from "@/components/week-calendar";
-import { beliefs, busyBlocks, users } from "@/lib/fixtures";
-import type { BusyBlock, Proposal } from "@/lib/types";
+import type { Belief, BusyBlock, Proposal, User } from "@/lib/types";
 import type { SuggestResponse } from "@/types/contracts";
 
 type CreatedHangout = Proposal & { threadId: string; usedFallback: boolean };
-
-const defaultInvitees = ["yonna", "isha"];
+type BusyBlockDraft = BusyBlock & { externalUid?: string };
 
 function formatSlot(start: string, end: string): string {
   const date = new Intl.DateTimeFormat("en-GB", {
@@ -55,14 +53,43 @@ function SparkleMark() {
 export function Dashboard() {
   const [calendarView, setCalendarView] =
     useState<CalendarView>("availability");
+  const [users, setUsers] = useState<User[]>([]);
+  const [storedBusyBlocks, setStoredBusyBlocks] = useState<BusyBlock[]>([]);
+  const [contextLoading, setContextLoading] = useState(true);
+  const [contextError, setContextError] = useState("");
   const [personalBlocks, setPersonalBlocks] = useState<BusyBlock[]>([]);
-  const [inviteeIds, setInviteeIds] = useState(() => new Set(defaultInvitees));
+  const [inviteeIds, setInviteeIds] = useState(() => new Set<string>());
   const [hangout, setHangout] = useState<CreatedHangout | null>(null);
-  const [agentBeliefs, setAgentBeliefs] = useState<SuggestResponse["evidence"]["beliefs"]>(beliefs);
-  const [proposalSubmitted, setProposalSubmitted] = useState(false);
+  const [baseBeliefs, setBaseBeliefs] = useState<SuggestResponse["evidence"]["beliefs"]>([]);
+  const [agentBeliefs, setAgentBeliefs] = useState<SuggestResponse["evidence"]["beliefs"]>([]);
   const [proposalError, setProposalError] = useState("");
   const [isProposing, setIsProposing] = useState(false);
   const invitees = users.filter((user) => inviteeIds.has(user.id));
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/agent/context")
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error ?? "Unable to load the group.");
+        return data;
+      })
+      .then((data: { members: User[]; beliefs: Belief[]; busyBlocks: BusyBlock[] }) => {
+        if (!active) return;
+        setUsers(data.members);
+        setStoredBusyBlocks(data.busyBlocks);
+        setInviteeIds(new Set(data.members.slice(0, 2).map((member) => member.id)));
+        const loadedBeliefs = data.beliefs.map((belief) => ({ ...belief, subjectUserId: belief.subjectUserId ?? "" }));
+        setBaseBeliefs(loadedBeliefs);
+        setAgentBeliefs(loadedBeliefs);
+        setContextError("");
+      })
+      .catch((error: unknown) => {
+        if (active) setContextError(error instanceof Error ? error.message : "Unable to load the group.");
+      })
+      .finally(() => { if (active) setContextLoading(false); });
+    return () => { active = false; };
+  }, []);
 
   function toggleInvitee(userId: string) {
     setInviteeIds((current) => {
@@ -75,13 +102,26 @@ export function Dashboard() {
       return next;
     });
     setHangout(null);
-    setProposalSubmitted(false);
-    setAgentBeliefs(beliefs);
+    setAgentBeliefs(baseBeliefs);
+  }
+
+  async function persistCalendarBlocks(blocks: BusyBlockDraft[], source: "manual" | "ics") {
+    for (const block of blocks) {
+      const response = await fetch("/api/calendar/blocks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: block.userId, start: block.start, end: block.end, source, externalUid: block.externalUid }),
+      });
+      const result = await response.json() as { block?: BusyBlock; error?: string };
+      if (!response.ok || !result.block) {
+        throw new Error(result.error ?? "Could not save this calendar block.");
+      }
+      setPersonalBlocks((current) => [...current, result.block!]);
+    }
   }
 
   async function createHangout() {
     setProposalError("");
-    setProposalSubmitted(false);
     if (invitees.length === 0) {
       setProposalError("Choose at least one person to invite.");
       return;
@@ -98,9 +138,6 @@ export function Dashboard() {
           startIso: "2026-10-19T15:00:00Z",
           endIso: "2026-10-27T00:00:00Z",
           durationMinutes: 120,
-          busyBlocks: personalBlocks
-            .filter((block) => block.userId === "yonna")
-            .map(({ userId, start, end }) => ({ userId, start, end })),
         }),
       });
       const result = (await response.json()) as
@@ -118,25 +155,7 @@ export function Dashboard() {
         threadId: result.threadId,
         usedFallback: result.usedFallback,
       });
-      const slotEvidence = result.evidence.candidates.find(
-        (slot) =>
-          slot.start === result.proposal.slot.start &&
-          slot.end === result.proposal.slot.end,
-      );
-      const currentSlotBeliefs = result.proposal.attendees.flatMap((userId) => {
-        const user = users.find((candidate) => candidate.id === userId);
-        if (!user || !slotEvidence?.freeUserIds.includes(userId)) return [];
-        return [
-          {
-            id: `slot-evidence-${result.threadId}-${userId}`,
-            subjectUserId: userId,
-            statement: `${user.name} has no recorded calendar conflict during the proposed time.`,
-            confidence: 1,
-            evidence: `The shared free/busy check found ${formatSlot(slotEvidence.start, slotEvidence.end)} clear in the recorded calendar. This does not confirm the person is available.`,
-          },
-        ];
-      });
-      setAgentBeliefs([...currentSlotBeliefs, ...result.evidence.beliefs]);
+      setAgentBeliefs(result.evidence.beliefs);
     } catch (error) {
       setProposalError(
         error instanceof Error
@@ -146,11 +165,6 @@ export function Dashboard() {
     } finally {
       setIsProposing(false);
     }
-  }
-
-  function submitProposal() {
-    // TODO: Persist the proposal and send an RSVP request to each invited attendee.
-    setProposalSubmitted(true);
   }
 
   return (
@@ -216,12 +230,12 @@ export function Dashboard() {
 
         <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(0,1.65fr)_minmax(340px,0.9fr)] xl:gap-6">
           <WeekCalendar
-            onAddBusyBlock={(block) =>
-              setPersonalBlocks((current) => [...current, block])
-            }
-            onImportBusyBlocks={(blocks) =>
-              setPersonalBlocks((current) => [...current, ...blocks])
-            }
+            key={users.map((user) => user.id).join(",")}
+            users={users}
+            busyBlocks={storedBusyBlocks}
+            personalUserId={users[0]?.id ?? ""}
+            onAddBusyBlock={(block) => persistCalendarBlocks([block], "manual")}
+            onImportBusyBlocks={(blocks) => persistCalendarBlocks(blocks, "ics")}
             onViewChange={setCalendarView}
             personalBlocks={personalBlocks}
             view={calendarView}
@@ -234,7 +248,7 @@ export function Dashboard() {
                   <CardTitle>Propose a hangout</CardTitle>
                   {hangout && (
                     <Badge variant="secondary">
-                      {hangout.usedFallback ? "Fixture fallback" : "Draft"} · v
+                      {hangout.usedFallback ? "Fallback saved" : "Saved"} · v
                       {hangout.version}
                     </Badge>
                   )}
@@ -285,12 +299,14 @@ export function Dashboard() {
                 <button
                   className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-primary-action px-4 py-3 text-sm font-semibold text-primary-action-foreground transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-pink"
                   onClick={createHangout}
-                  disabled={isProposing}
+                  disabled={isProposing || contextLoading || users.length === 0}
                   type="button"
                 >
                   <SparkleMark />
                   {isProposing ? "Asking the agent…" : "Propose a hangout"}
                 </button>
+                {contextLoading && <p className="mt-3 text-sm text-muted-foreground">Loading group data…</p>}
+                {contextError && <p className="mt-3 text-sm font-medium text-pink-strong" role="alert">{contextError}</p>}
                 {proposalError && (
                   <p
                     className="mt-3 text-sm font-medium text-pink-strong"
@@ -338,32 +354,10 @@ export function Dashboard() {
                   </div>
                 )}
                 {hangout && (
-                  <>
-                    <button
-                      className="mt-4 flex w-full items-center justify-center rounded-xl bg-primary-action px-4 py-3 text-sm font-semibold text-primary-action-foreground transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-pink disabled:cursor-not-allowed disabled:opacity-60"
-                      disabled={proposalSubmitted}
-                      onClick={submitProposal}
-                      type="button"
-                    >
-                      {proposalSubmitted
-                        ? "Proposal submitted"
-                        : "Submit proposal"}
-                    </button>
-                    {proposalSubmitted && (
-                      <p
-                        className="mt-2 text-center text-xs text-muted-foreground"
-                        role="status"
-                      >
-                        Demo only — RSVP delivery is not connected yet.
-                      </p>
-                    )}
-                  </>
+                  <p className="mt-3 text-xs leading-5 text-muted-foreground">
+                    This proposal is saved to the group database. Invitation delivery is not connected yet.
+                  </p>
                 )}
-                <p className="mt-3 text-xs leading-5 text-muted-foreground">
-                  {proposalSubmitted
-                    ? "The proposal was marked as submitted in this demo."
-                    : "No invitations are sent until you submit the proposal."}
-                </p>
               </CardContent>
             </Card>
 

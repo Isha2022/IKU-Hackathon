@@ -4,16 +4,9 @@ import { collectAgentEvidence, createAgentToolHandlers, executeAgentTool } from 
 import { runGeminiAgent } from "./loop";
 import { replyPrompt, suggestionPrompt } from "./prompts";
 import { proposalResponseSchema, replyInterpretationSchema } from "./schemas";
-import {
-  createProposalVersion,
-  areAllAttendeesAccepted,
-  DEMO_GROUP_ID,
-  DEMO_THREAD_ID,
-  fixtureAgentContext,
-  getProposal,
-  recordDemoConstraint,
-  recordDemoRsvp,
-} from "../lib/agent/runtime";
+import { databaseAgentContext } from "../lib/agent/database-context";
+import { getGroupMembers } from "../db/context";
+import { getLatestProposal, getRsvpHistory, recordRsvp, reviseProposal, saveProposalConstraint } from "../db/proposals";
 
 interface ReplyInterpretation {
   response: "accepted" | "declined" | "commented";
@@ -164,20 +157,22 @@ function validateModelProposal(
 }
 
 export async function processReply(input: ReplyRequest): Promise<ReplyResponse> {
-  const threadId = input.threadId ?? DEMO_THREAD_ID;
-  const previousProposal = getProposal(threadId);
+  const threadId = input.threadId;
+  if (!threadId) throw new Error("threadId is required.");
+  const previousProposal = await getLatestProposal(threadId);
+  if (!previousProposal) throw new Error("Proposal thread not found.");
   if (input.proposalVersion !== previousProposal.version) {
     throw new Error(`Stale proposal version. Current version is ${previousProposal.version}.`);
   }
   const message = input.message.trim();
   if (!message || message.length > 2000) throw new Error("Reply message must contain 1 to 2000 characters.");
   if (!previousProposal.attendees.includes(input.userId)) throw new Error("Only proposal attendees can reply.");
-  const user = (await fixtureAgentContext.getUsers([input.userId]))[0];
-  if (!user) throw new Error("Unknown demo user.");
+  const user = (await getGroupMembers(previousProposal.groupId)).find((member) => member.id === input.userId);
+  if (!user) throw new Error("Unknown group member.");
 
-  const handlers = createAgentToolHandlers(fixtureAgentContext);
+  const handlers = createAgentToolHandlers(databaseAgentContext);
   const interpretationResult = await runGeminiAgent<ReplyInterpretation>({
-    prompt: replyPrompt({ groupId: DEMO_GROUP_ID, proposal: previousProposal, userName: user.name, message }),
+    prompt: replyPrompt({ groupId: previousProposal.groupId, proposal: previousProposal, userName: user.name, message }),
     responseSchema: replyInterpretationSchema,
     executeTool: (name, args) => executeAgentTool(handlers, name, args),
     fallback: () => deterministicInterpretation(message),
@@ -187,8 +182,8 @@ export async function processReply(input: ReplyRequest): Promise<ReplyResponse> 
     ? new Date(input.receivedAt).toISOString()
     : new Date().toISOString();
   const searchEnd = new Date(Date.parse(previousProposal.slot.start) + 7 * 86_400_000).toISOString();
-  const evidence = await collectAgentEvidence(fixtureAgentContext, {
-    groupId: DEMO_GROUP_ID,
+  const evidence = await collectAgentEvidence(databaseAgentContext, {
+    groupId: previousProposal.groupId,
     userIds: previousProposal.attendees,
     startIso: previousProposal.slot.start,
     endIso: searchEnd,
@@ -216,7 +211,7 @@ export async function processReply(input: ReplyRequest): Promise<ReplyResponse> 
   if (candidates.length && relevantConstraints.length) {
     const narrowedEvidence = { ...evidence, candidates };
     const revisionPrompt = `${suggestionPrompt({
-      groupId: DEMO_GROUP_ID,
+      groupId: previousProposal.groupId,
       userIds: previousProposal.attendees,
       startIso: previousProposal.slot.start,
       endIso: searchEnd,
@@ -238,29 +233,48 @@ export async function processReply(input: ReplyRequest): Promise<ReplyResponse> 
     }
     const changed = chosen.start !== previousProposal.slot.start || chosen.end !== previousProposal.slot.end || chosen.title !== previousProposal.title;
     if (changed) {
-      const proposal: Proposal = createProposalVersion(threadId, {
+      revised = await reviseProposal(threadId, {
+        expectedVersion: previousProposal.version,
         slot: { start: chosen.start, end: chosen.end },
         title: chosen.title,
         attendees: previousProposal.attendees,
         assumptions: chosen.assumptions,
+        activityType: chosen.activity,
         reasoning: chosen.reasoning,
-        version: 0,
       });
-      revised = proposal;
     }
   }
 
-  const rsvp = recordDemoRsvp({
+  const rsvpEvent = await recordRsvp(previousProposal.id, input.userId,
+    interpretation.response === "accepted" ? "yes" : interpretation.response === "declined" ? "no" : "maybe",
+    message,
+    { extractedConstraints: interpretation.constraints.map(({ kind, value, scope, confidence, evidence }) => ({ kind, value, scope, confidence, evidence })), receivedAt },
+  );
+  for (const constraint of interpretation.constraints) {
+    await saveProposalConstraint({
+      proposalId: previousProposal.id,
+      userId: input.userId,
+      originalText: message,
+      constraintType: constraint.kind === "after_time" ? "not_before"
+        : constraint.kind === "before_time" ? "not_after"
+          : constraint.kind === "venue" && constraint.value.toLowerCase().includes("indoor") ? "indoor" : "other",
+      constraintValue: { kind: constraint.kind, value: constraint.value, confidence: constraint.confidence },
+      scope: constraint.scope,
+    });
+  }
+
+  const rsvp = {
+    id: `${rsvpEvent.proposalId}-${rsvpEvent.userId}-${rsvpEvent.time}`,
     threadId,
     proposalVersion: previousProposal.version,
-    userId: input.userId,
+    userId: rsvpEvent.userId,
     response: interpretation.response,
     message,
-    receivedAt,
-  });
-  for (const constraint of interpretation.constraints) {
-    recordDemoConstraint(threadId, input.userId, constraint);
-  }
+    receivedAt: rsvpEvent.time,
+  } as const;
+  const latestRsvps = await getRsvpHistory(revised.id);
+  const readyForConfirmation = revised.attendees.length > 0 && revised.attendees.every((attendeeId) =>
+    latestRsvps.filter((event) => event.userId === attendeeId).at(-1)?.response === "yes");
 
   return {
     rsvp,
@@ -272,6 +286,6 @@ export async function processReply(input: ReplyRequest): Promise<ReplyResponse> 
       : `${interpretation.summary} Updated the proposal to ${revised.title} because of the new constraint.`,
     evidence: { ...evidence, candidates, rsvps: [...evidence.rsvps, rsvp] },
     usedFallback,
-    readyForConfirmation: areAllAttendeesAccepted(threadId, revised.version, revised.attendees),
+    readyForConfirmation,
   };
 }

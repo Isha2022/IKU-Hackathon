@@ -1,17 +1,11 @@
-import type { Proposal } from "../lib/types";
 import type { AgentToolContext } from "./handlers";
 import type { SuggestRequest, SuggestResponse } from "../types/contracts";
 import { collectAgentEvidence, createAgentToolHandlers, executeAgentTool } from "./handlers";
 import { runGeminiAgent } from "./loop";
 import { suggestionPrompt } from "./prompts";
 import { proposalResponseSchema } from "./schemas";
-import {
-  createProposalVersion,
-  DEMO_GROUP_ID,
-  fixtureAgentContext,
-  startProposalThread,
-} from "../lib/agent/runtime";
-import { initialProposal } from "../lib/fixtures";
+import { createProposal } from "../db/proposals";
+import { DEMO_GROUP_ID, databaseAgentContext } from "../lib/agent/database-context";
 
 interface ModelProposal {
   start: string;
@@ -22,7 +16,12 @@ interface ModelProposal {
   assumptions: string[];
 }
 
-const DEFAULT_USERS = ["yonna", "isha", "agrima"];
+const DEFAULT_USERS = [
+  "11111111-1111-4111-8111-111111111111",
+  "22222222-2222-4222-8222-222222222222",
+  "33333333-3333-4333-8333-333333333333",
+  "44444444-4444-4444-8444-444444444444",
+];
 const DEFAULT_START = "2026-10-23T08:00:00Z";
 const DEFAULT_END = "2026-10-26T08:00:00Z";
 
@@ -46,10 +45,7 @@ function validateModelProposal(value: unknown, candidates: SuggestResponse["evid
 }
 
 function deterministicFallback(candidates: SuggestResponse["evidence"]["candidates"]): ModelProposal {
-  const preferred = candidates.find(
-    (slot) => slot.start === initialProposal.slot.start && slot.end === initialProposal.slot.end,
-  );
-  const slot = preferred ?? candidates[0];
+  const slot = candidates[0];
   if (!slot) throw new Error("No shared free slots were found for the selected users.");
   return {
     start: slot.start,
@@ -67,6 +63,7 @@ export async function suggestHangout(input: SuggestRequest = {}): Promise<Sugges
   const endIso = input.endIso ?? DEFAULT_END;
   const durationMinutes = input.durationMinutes ?? 150;
   const groupId = input.groupId ?? DEMO_GROUP_ID;
+  if (groupId !== DEMO_GROUP_ID) throw new Error("Unknown group.");
   const personalBusyBlocks = input.busyBlocks ?? [];
   if (!Number.isInteger(durationMinutes) || durationMinutes < 15 || durationMinutes > 720) {
     throw new Error("durationMinutes must be an integer between 15 and 720.");
@@ -95,9 +92,9 @@ export async function suggestHangout(input: SuggestRequest = {}): Promise<Sugges
   }
 
   const context: AgentToolContext = {
-    ...fixtureAgentContext,
+    ...databaseAgentContext,
     async getBusyBlocks(ids, rangeStart, rangeEnd) {
-      const fixtureBlocks = await fixtureAgentContext.getBusyBlocks(ids, rangeStart, rangeEnd);
+      const storedBlocks = await databaseAgentContext.getBusyBlocks(ids, rangeStart, rangeEnd);
       const rangeStartMs = Date.parse(rangeStart);
       const rangeEndMs = Date.parse(rangeEnd);
       const additional = personalBusyBlocks
@@ -108,7 +105,7 @@ export async function suggestHangout(input: SuggestRequest = {}): Promise<Sugges
           start: new Date(block.start).toISOString(),
           end: new Date(block.end).toISOString(),
         }));
-      return [...fixtureBlocks, ...additional];
+      return [...storedBlocks, ...additional];
     },
   };
 
@@ -140,15 +137,14 @@ export async function suggestHangout(input: SuggestRequest = {}): Promise<Sugges
     chosen = deterministicFallback(evidence.candidates);
     result.usedFallback = true;
   }
-  const threadId = `demo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  startProposalThread(threadId);
-  const proposal: Proposal = createProposalVersion(threadId, {
+  const proposal = await createProposal({
+    groupId,
     slot: { start: chosen.start, end: chosen.end },
     title: chosen.title.trim() || chosen.activity,
     attendees: userIds,
     assumptions: chosen.assumptions,
     reasoning: chosen.reasoning,
-    version: 0,
+    activityType: chosen.activity,
   });
-  return { threadId, proposal, evidence, usedFallback: result.usedFallback };
+  return { threadId: proposal.threadId, proposal, evidence, usedFallback: result.usedFallback };
 }

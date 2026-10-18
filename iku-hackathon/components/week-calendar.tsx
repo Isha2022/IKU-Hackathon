@@ -9,18 +9,21 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { busyBlocks, users } from "@/lib/fixtures";
 import { londonDateTimeToUtc } from "@/lib/time";
-import type { BusyBlock } from "@/lib/types";
+import type { BusyBlock, User } from "@/lib/types";
 
 export type CalendarView = "personal" | "availability";
+type BusyBlockDraft = BusyBlock & { externalUid?: string };
 
 type WeekCalendarProps = {
   view: CalendarView;
   onViewChange: (view: CalendarView) => void;
   personalBlocks: BusyBlock[];
-  onAddBusyBlock: (block: BusyBlock) => void;
-  onImportBusyBlocks: (blocks: BusyBlock[]) => void;
+  onAddBusyBlock: (block: BusyBlockDraft) => Promise<void>;
+  onImportBusyBlocks: (blocks: BusyBlockDraft[]) => Promise<void>;
+  users: User[];
+  busyBlocks: BusyBlock[];
+  personalUserId: string;
 };
 
 const timezone = "Europe/London";
@@ -34,8 +37,6 @@ const dayNumber = new Intl.DateTimeFormat("en-GB", {
   timeZone: timezone,
   day: "numeric",
 });
-const personalUserId = "yonna";
-
 function localHourToUtc(date: Date, hour: number): Date {
   const localDate = [
     date.getUTCFullYear(),
@@ -130,7 +131,7 @@ function parseIcsDateTime(value: string, tzid?: string): Date {
   );
 }
 
-function parseIcsBusyBlocks(contents: string): BusyBlock[] {
+function parseIcsBusyBlocks(contents: string, personalUserId: string): BusyBlockDraft[] {
   const unfolded = contents.replace(/\r?\n[ \t]/g, "");
   const events = unfolded.match(/BEGIN:VEVENT[\s\S]*?END:VEVENT/g) ?? [];
   if (events.length === 0) {
@@ -167,6 +168,7 @@ function parseIcsBusyBlocks(contents: string): BusyBlock[] {
       userId: personalUserId,
       start: start.toISOString(),
       end: end.toISOString(),
+      externalUid: /^UID:(.+)$/m.exec(event)?.[1]?.trim(),
     };
   });
 }
@@ -177,6 +179,9 @@ export function WeekCalendar({
   personalBlocks,
   onAddBusyBlock,
   onImportBusyBlocks,
+  users,
+  busyBlocks,
+  personalUserId,
 }: WeekCalendarProps) {
   const [selectedUserIds, setSelectedUserIds] = useState(
     () => new Set(users.map((user) => user.id)),
@@ -214,7 +219,7 @@ export function WeekCalendar({
     setSelectedUserIds(new Set(users.map((user) => user.id)));
   }
 
-  function addBusyTime(event: FormEvent<HTMLFormElement>) {
+  async function addBusyTime(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
     setFormError("");
@@ -241,7 +246,7 @@ export function WeekCalendar({
         throw new Error("Busy time must end after it starts.");
       }
 
-      onAddBusyBlock({
+      await onAddBusyBlock({
         id: `manual-${Date.now()}`,
         userId: personalUserId,
         start: start.toISOString(),
@@ -264,8 +269,8 @@ export function WeekCalendar({
     setFormError("");
     setStatusMessage("");
     try {
-      const blocks = parseIcsBusyBlocks(await file.text());
-      onImportBusyBlocks(blocks);
+      const blocks = parseIcsBusyBlocks(await file.text(), personalUserId);
+      await onImportBusyBlocks(blocks);
       setStatusMessage(
         `Imported ${blocks.length} busy ${
           blocks.length === 1 ? "time" : "times"

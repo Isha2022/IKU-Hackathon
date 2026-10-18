@@ -21,7 +21,7 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json(await processReply(body));
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to process the reply.";
-    const status = message.startsWith("Stale proposal version") ? 409 : 400;
+    const status = message.startsWith("Stale proposal version") || message.startsWith("Proposal version conflict") ? 409 : 400;
     return Response.json({ error: message }, { status });
   }
 }
